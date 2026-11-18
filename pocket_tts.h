@@ -14,6 +14,27 @@ extern "C" {
 void* ptt_create(const char* models_dir, const char* voices_dir, const char* tokenizer_path,
                  const char* precision, float temperature, int lsd_steps, int num_threads);
 
+/* All engine options. Initialise with ptt_config_default(), then change what you need. */
+typedef struct ptt_config {
+    const char* models_dir;      /* default "models" */
+    const char* voices_dir;      /* default "voices" */
+    const char* tokenizer_path;  /* default "models/tokenizer.model" */
+    const char* precision;       /* "int8" (default) or "fp32" */
+    float temperature;           /* default 0.7 */
+    int   lsd_steps;             /* default 1 */
+    int   num_threads;           /* default 0 = half the cores */
+    float eos_threshold;         /* end-of-speech logit threshold, default -4.0 */
+    int   eos_extra_frames;      /* frames generated after end of speech; -1 = auto (default) */
+    float noise_clamp;           /* 0 = off (default) */
+    int   voice_cache;           /* 1 = cache voice embeddings / KV state on disk (default) */
+    const char* cache_dir;       /* voice cache folder; NULL = "<voices_dir>/.cache" (default) */
+} ptt_config;
+
+ptt_config ptt_config_default(void);
+
+/* Creates an engine from a full configuration. Returns NULL on error (message on stderr). */
+void* ptt_create_ex(const ptt_config* config);
+
 /* Runs one short synthesis so the first real line is fast. Returns seconds, or -1 on error. */
 double ptt_warmup(void* handle);
 

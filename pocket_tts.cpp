@@ -2553,6 +2553,8 @@ private:
 // C API (FFI)
 // ════════════════════════════════════════════════════════════════════════════
 
+#include "pocket_tts.h"
+
 extern "C" {
 
 void* ptt_create(const char* models_dir, const char* voices_dir,
@@ -2567,6 +2569,46 @@ void* ptt_create(const char* models_dir, const char* voices_dir,
         cfg.temperature = temperature;
         cfg.lsd_steps = lsd_steps;
         cfg.num_threads = num_threads;
+        return new pocket_tts::PocketTTS(cfg);
+    } catch (const std::exception& e) {
+        std::cerr << "[pocket-tts] init error: " << e.what() << "\n";
+        return nullptr;
+    }
+}
+
+ptt_config ptt_config_default(void) {
+    static const pocket_tts::Config d;  // defaults live in Config
+    ptt_config c{};
+    c.models_dir = nullptr;
+    c.voices_dir = nullptr;
+    c.tokenizer_path = nullptr;
+    c.precision = nullptr;
+    c.temperature = d.temperature;
+    c.lsd_steps = d.lsd_steps;
+    c.num_threads = d.num_threads;
+    c.eos_threshold = d.eos_threshold;
+    c.eos_extra_frames = d.eos_extra_frames;
+    c.noise_clamp = d.noise_clamp;
+    c.voice_cache = d.voice_cache ? 1 : 0;
+    c.cache_dir = nullptr;
+    return c;
+}
+
+void* ptt_create_ex(const ptt_config* c) {
+    if (!c) return nullptr;
+    try {
+        pocket_tts::Config cfg;
+        if (c->models_dir) cfg.models_dir = c->models_dir;
+        if (c->voices_dir) cfg.voices_dir = c->voices_dir;
+        if (c->tokenizer_path) cfg.tokenizer_path = c->tokenizer_path;
+        if (c->precision) cfg.precision = c->precision;
+        cfg.temperature = c->temperature;
+        cfg.lsd_steps = c->lsd_steps;
+        cfg.num_threads = c->num_threads;
+        cfg.eos_threshold = c->eos_threshold;
+        cfg.eos_extra_frames = c->eos_extra_frames;
+        cfg.noise_clamp = c->noise_clamp;
+        cfg.voice_cache = c->voice_cache != 0;
         return new pocket_tts::PocketTTS(cfg);
     } catch (const std::exception& e) {
         std::cerr << "[pocket-tts] init error: " << e.what() << "\n";
