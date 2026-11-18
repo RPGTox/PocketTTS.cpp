@@ -27,7 +27,8 @@ typedef struct ptt_config {
     int   eos_extra_frames;      /* frames generated after end of speech; -1 = auto (default) */
     float noise_clamp;           /* 0 = off (default) */
     int   voice_cache;           /* 1 = cache voice embeddings / KV state on disk (default) */
-    const char* cache_dir;       /* voice cache folder; NULL = "<voices_dir>/.cache" (default) */
+    const char* cache_dir;       /* voice cache folder; NULL = "<voices_dir>/.cache" (default).
+                                    Files: <stem>-<hash of the voice path>.emb / .kv */
 } ptt_config;
 
 ptt_config ptt_config_default(void);

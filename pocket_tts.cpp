@@ -170,6 +170,7 @@ struct Config {
     int eos_extra_frames = -1;  // -1 = auto-calculate from text length
     bool verbose = false;
     bool voice_cache = true;
+    std::string cache_dir;  // voice cache folder; empty = voices_dir + "/.cache"
 };
 
 struct AudioData {
@@ -473,15 +474,30 @@ static bool mkdir_p(const std::string& path) {
     return ptt_mkdir(path.c_str()) == 0 || errno == EEXIST;
 }
 
-// Derive cache file path: voices/.cache/{stem}.{ext}
+// Derive cache file path: {cache_root}/{stem}-{hash}.{ext}
+// cache_root = Config::cache_dir, or {voices_dir}/.cache when empty (upstream default).
+// The hash (FNV-1a of the full voice path) keeps clips with the same file name in
+// different folders from sharing a cache entry.
 // ext = "emb" for voice embeddings, "kv" for KV state snapshots
-static std::string get_cache_path(const std::string& voices_dir, const std::string& voice_path, const char* ext = "emb") {
+static std::string cache_root(const std::string& voices_dir, const std::string& cache_dir) {
+    return cache_dir.empty() ? voices_dir + "/.cache" : cache_dir;
+}
+
+static std::string get_cache_path(const std::string& root, const std::string& voice_path, const char* ext = "emb") {
     std::string filename = voice_path;
     size_t slash = voice_path.find_last_of("/\\");
     if (slash != std::string::npos) filename = voice_path.substr(slash + 1);
     size_t dot = filename.rfind('.');
     if (dot != std::string::npos) filename = filename.substr(0, dot);
-    return voices_dir + "/.cache/" + filename + "." + ext;
+    uint32_t h = 2166136261u;
+    for (unsigned char ch : voice_path) {
+        if (ch == '\\') ch = '/';
+        if (ch >= 'A' && ch <= 'Z') ch = static_cast<unsigned char>(ch - 'A' + 'a');  // Windows paths
+        h = (h ^ ch) * 16777619u;
+    }
+    char hex[9];
+    std::snprintf(hex, sizeof hex, "%08x", h);
+    return root + "/" + filename + "-" + hex + "." + ext;
 }
 
 static bool is_cache_valid(const std::string& voice_path, const std::string& cache_path) {
@@ -1553,7 +1569,7 @@ public:
         auto timer = g_prof.time("encode_voice");
         
         if (cfg_.voice_cache) {
-            std::string cache_path = cache::get_cache_path(cfg_.voices_dir, path);
+            std::string cache_path = cache::get_cache_path(cache::cache_root(cfg_.voices_dir, cfg_.cache_dir), path);
             
             if (cache::is_cache_valid(path, cache_path)) {
                 auto cache_timer = g_prof.time("encode_voice.cache_load");
@@ -1596,7 +1612,7 @@ public:
         if (r.shape.size() < 3) r.reshape({1, r.shape[0], r.shape[1]});
         
         if (cfg_.voice_cache) {
-            std::string cache_path = cache::get_cache_path(cfg_.voices_dir, path);
+            std::string cache_path = cache::get_cache_path(cache::cache_root(cfg_.voices_dir, cfg_.cache_dir), path);
             if (cache::save_embedding(cache_path, r.shape, r.data)) {
                 if (cfg_.verbose) {
                     std::cerr << "  Saved embedding cache: " << cache_path << "\n";
@@ -1898,7 +1914,7 @@ private:
         
         // Tier 2: disk cache hit
         if (cfg_.voice_cache && !voice_kv_path_.empty()) {
-            std::string kv_path = cache::get_cache_path(cfg_.voices_dir, voice_kv_path_, "kv");
+            std::string kv_path = cache::get_cache_path(cache::cache_root(cfg_.voices_dir, cfg_.cache_dir), resolve_voice_path(voice_kv_path_), "kv");
             std::string resolved = resolve_voice_path(voice_kv_path_);
             StateBufferIO::DiskSnapshot ds;
             if (cache::is_cache_valid(resolved, kv_path) && ds.load_from_disk(kv_path)) {
@@ -1917,7 +1933,7 @@ private:
         voice_kv_hash_ = vh;
         
         if (cfg_.voice_cache && !voice_kv_path_.empty()) {
-            std::string kv_path = cache::get_cache_path(cfg_.voices_dir, voice_kv_path_, "kv");
+            std::string kv_path = cache::get_cache_path(cache::cache_root(cfg_.voices_dir, cfg_.cache_dir), resolve_voice_path(voice_kv_path_), "kv");
             auto ds = main_runner_->snapshot_to_disk(*voice_kv_snap_);
             if (ds.save_to_disk(kv_path)) {
                 if (cfg_.verbose) std::cerr << "  Saved KV cache: " << kv_path << "\n";
@@ -2609,6 +2625,7 @@ void* ptt_create_ex(const ptt_config* c) {
         cfg.eos_extra_frames = c->eos_extra_frames;
         cfg.noise_clamp = c->noise_clamp;
         cfg.voice_cache = c->voice_cache != 0;
+        if (c->cache_dir) cfg.cache_dir = c->cache_dir;
         return new pocket_tts::PocketTTS(cfg);
     } catch (const std::exception& e) {
         std::cerr << "[pocket-tts] init error: " << e.what() << "\n";
