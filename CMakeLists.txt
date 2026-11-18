@@ -22,8 +22,10 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
+if(PROJECT_IS_TOP_LEVEL)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
+endif()
 
 # =============================================================================
 # Dependencies
@@ -31,36 +33,48 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
 include(FetchContent)
 set(FETCHCONTENT_QUIET OFF)
 
-# ONNX Runtime (pre-built) - https://github.com/microsoft/onnxruntime/releases
-set(ONNXRUNTIME_VERSION "1.23.2")
-
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
-        set(ONNXRUNTIME_ARCH "x64")
-    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
-        set(ONNXRUNTIME_ARCH "aarch64")
-    endif()
-    set(ONNXRUNTIME_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-${ONNXRUNTIME_ARCH}-${ONNXRUNTIME_VERSION}.tgz")
-elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-    set(ONNXRUNTIME_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-osx-universal2-${ONNXRUNTIME_VERSION}.tgz")
-elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    set(ONNXRUNTIME_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-win-x64-${ONNXRUNTIME_VERSION}.zip")
-endif()
-
-FetchContent_Declare(onnxruntime
-    URL ${ONNXRUNTIME_URL}
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-)
-FetchContent_MakeAvailable(onnxruntime)
-
-set(ONNXRUNTIME_ROOT ${onnxruntime_SOURCE_DIR})
-set(ONNXRUNTIME_INCLUDE_DIR ${ONNXRUNTIME_ROOT}/include)
-if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    set(ONNXRUNTIME_LIB ${ONNXRUNTIME_ROOT}/lib/onnxruntime.lib)
-elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-    set(ONNXRUNTIME_LIB ${ONNXRUNTIME_ROOT}/lib/libonnxruntime.dylib)
+# ONNX Runtime
+# A parent project may provide its own imported target named `onnxruntime` (UANF fork: the
+# GitHub release URLs below returned 404 in 2026-11, and the parent pins the official NuGet
+# package instead). Otherwise the pre-built release is downloaded as upstream does.
+if(TARGET onnxruntime)
+    set(PTT_EXTERNAL_ORT ON)
+    get_target_property(ONNXRUNTIME_INCLUDE_DIR onnxruntime INTERFACE_INCLUDE_DIRECTORIES)
+    set(ONNXRUNTIME_LIB onnxruntime)
+    set(ONNXRUNTIME_VERSION "provided by parent project")
 else()
-    set(ONNXRUNTIME_LIB ${ONNXRUNTIME_ROOT}/lib/libonnxruntime.so)
+    set(PTT_EXTERNAL_ORT OFF)
+    # Pre-built ONNX Runtime - https://github.com/microsoft/onnxruntime/releases
+    set(ONNXRUNTIME_VERSION "1.23.2")
+
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+            set(ONNXRUNTIME_ARCH "x64")
+        elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+            set(ONNXRUNTIME_ARCH "aarch64")
+        endif()
+        set(ONNXRUNTIME_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-${ONNXRUNTIME_ARCH}-${ONNXRUNTIME_VERSION}.tgz")
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+        set(ONNXRUNTIME_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-osx-universal2-${ONNXRUNTIME_VERSION}.tgz")
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+        set(ONNXRUNTIME_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-win-x64-${ONNXRUNTIME_VERSION}.zip")
+    endif()
+
+    FetchContent_Declare(onnxruntime
+        URL ${ONNXRUNTIME_URL}
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_MakeAvailable(onnxruntime)
+
+    set(ONNXRUNTIME_ROOT ${onnxruntime_SOURCE_DIR})
+    set(ONNXRUNTIME_INCLUDE_DIR ${ONNXRUNTIME_ROOT}/include)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+        set(ONNXRUNTIME_LIB ${ONNXRUNTIME_ROOT}/lib/onnxruntime.lib)
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+        set(ONNXRUNTIME_LIB ${ONNXRUNTIME_ROOT}/lib/libonnxruntime.dylib)
+    else()
+        set(ONNXRUNTIME_LIB ${ONNXRUNTIME_ROOT}/lib/libonnxruntime.so)
+    endif()
 endif()
 
 # SentencePiece (static library only) - https://github.com/google/sentencepiece/releases
@@ -98,8 +112,7 @@ set(SENTENCEPIECE_INCLUDE_DIRS "${sentencepiece_SOURCE_DIR}/src")
 # dr_libs (header-only) - https://github.com/mackron/dr_libs
 FetchContent_Declare(dr_libs
     GIT_REPOSITORY https://github.com/mackron/dr_libs.git
-    GIT_TAG master
-    GIT_SHALLOW TRUE
+    GIT_TAG 7f032b984ae5dd3ab8a58721375aca9200f91965  # pinned (was: master)
 )
 FetchContent_MakeAvailable(dr_libs)
 
@@ -109,6 +122,26 @@ FetchContent_MakeAvailable(dr_libs)
 
 option(BUILD_SHARED_LIB "Build libpocket_tts.so for FFI (Deno, Python, etc.)" OFF)
 
+option(PTT_BUILD_CLI "Build the pocket-tts CLI / HTTP server executable" ${PROJECT_IS_TOP_LEVEL})
+option(PTT_BUILD_STATIC_LIB "Build pocket_tts_static (C API, no main) for embedding" ON)
+
+# Static library with the C API only (no CLI main), for embedding in another executable.
+# Include pocket_tts.h. Used by UANF (in-process TTS, no HTTP server).
+if(PTT_BUILD_STATIC_LIB)
+    add_library(pocket_tts_static STATIC pocket_tts.cpp)
+    target_compile_definitions(pocket_tts_static PRIVATE PTT_SHARED_LIB)
+    target_include_directories(pocket_tts_static
+        PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}
+        PRIVATE ${ONNXRUNTIME_INCLUDE_DIR} ${SENTENCEPIECE_INCLUDE_DIRS} ${dr_libs_SOURCE_DIR})
+    target_link_libraries(pocket_tts_static PUBLIC ${ONNXRUNTIME_LIB} PRIVATE sentencepiece-static)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_link_libraries(pocket_tts_static PUBLIC pthread dl)
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+        target_link_libraries(pocket_tts_static PUBLIC ws2_32)
+    endif()
+endif()
+
+if(PTT_BUILD_CLI)
 # Executable (CLI + HTTP server)
 add_executable(pocket-tts pocket_tts.cpp)
 
@@ -141,6 +174,8 @@ else()
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${ONNXRUNTIME_LIB} $<TARGET_FILE_DIR:pocket-tts>
     )
 endif()
+
+endif() # PTT_BUILD_CLI
 
 # Shared library (for FFI from Deno/Python)
 # Build with: cmake -B .build -DBUILD_SHARED_LIB=ON
