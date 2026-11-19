@@ -64,6 +64,7 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iomanip>
@@ -453,25 +454,41 @@ static Profiler g_prof;
 //                hundreds of ms for a full conditioning pass.
 // ════════════════════════════════════════════════════════════════════════════
 
+// ── UTF-8 file paths (UANF fork) ────────────────────────────────────────────
+// Every path string in this file (and in the C API) is UTF-8. Opening files with the narrow
+// C runtime uses the ANSI code page on Windows, so folders like "Éléments voix" failed;
+// std::filesystem::u8path gives the native (wide) path on every platform.
+
+static std::filesystem::path utf8_path(const std::string& s) {
+    return std::filesystem::u8path(s);
+}
+
+static bool read_file_bytes(const std::string& path, std::vector<unsigned char>& out) {
+    std::ifstream f(utf8_path(path), std::ios::binary);
+    if (!f) return false;
+    f.seekg(0, std::ios::end);
+    const std::streamoff size = f.tellg();
+    if (size < 0) return false;
+    f.seekg(0, std::ios::beg);
+    out.resize(static_cast<size_t>(size));
+    return size == 0 || static_cast<bool>(f.read(reinterpret_cast<char*>(out.data()), size));
+}
+
 namespace cache {
 
-static time_t get_mtime(const std::string& path) {
-    struct stat st;
-    if (stat(path.c_str(), &st) != 0) return 0;
-    return st.st_mtime;
+// Modification time as a comparable count (0 if the file does not exist).
+static int64_t get_mtime(const std::string& path) {
+    std::error_code ec;
+    const auto t = std::filesystem::last_write_time(utf8_path(path), ec);
+    if (ec) return 0;
+    const auto count = static_cast<int64_t>(t.time_since_epoch().count());
+    return count > 0 ? count : 1;
 }
 
 static bool mkdir_p(const std::string& path) {
-    size_t pos = 0;
-    while (pos < path.size()) {
-        size_t slash = path.find('/', pos + 1);
-        size_t bslash = path.find('\\', pos + 1);
-        pos = std::min(slash, bslash);
-        if (pos == std::string::npos) break;
-        std::string sub = path.substr(0, pos);
-        if (!sub.empty()) ptt_mkdir(sub.c_str());
-    }
-    return ptt_mkdir(path.c_str()) == 0 || errno == EEXIST;
+    std::error_code ec;
+    std::filesystem::create_directories(utf8_path(path), ec);
+    return !ec || std::filesystem::is_directory(utf8_path(path), ec);
 }
 
 // Derive cache file path: {cache_root}/{stem}-{hash}.{ext}
@@ -501,8 +518,8 @@ static std::string get_cache_path(const std::string& root, const std::string& vo
 }
 
 static bool is_cache_valid(const std::string& voice_path, const std::string& cache_path) {
-    time_t voice_mtime = get_mtime(voice_path);
-    time_t cache_mtime = get_mtime(cache_path);
+    int64_t voice_mtime = get_mtime(voice_path);
+    int64_t cache_mtime = get_mtime(cache_path);
     return cache_mtime > 0 && cache_mtime >= voice_mtime;
 }
 
@@ -517,7 +534,7 @@ static bool save_embedding(const std::string& path, const std::vector<int64_t>& 
         mkdir_p(path.substr(0, slash));
     }
     
-    std::ofstream f(path, std::ios::binary);
+    std::ofstream f(utf8_path(path), std::ios::binary);
     if (!f) return false;
     
     uint32_t magic = EMB_MAGIC;
@@ -532,7 +549,7 @@ static bool save_embedding(const std::string& path, const std::vector<int64_t>& 
 }
 
 static bool load_embedding(const std::string& path, std::vector<int64_t>& shape, std::vector<float>& data) {
-    std::ifstream f(path, std::ios::binary);
+    std::ifstream f(utf8_path(path), std::ios::binary);
     if (!f) return false;
     
     uint32_t magic;
@@ -845,7 +862,7 @@ struct StateBufferIO {
         bool save_to_disk(const std::string& path) const {
             size_t slash = path.find_last_of('/');
             if (slash != std::string::npos) cache::mkdir_p(path.substr(0, slash));
-            std::ofstream f(path, std::ios::binary);
+            std::ofstream f(utf8_path(path), std::ios::binary);
             if (!f) return false;
             uint32_t magic = MAGIC;
             uint64_t sz = blob.size();
@@ -856,7 +873,7 @@ struct StateBufferIO {
         }
         
         bool load_from_disk(const std::string& path) {
-            std::ifstream f(path, std::ios::binary);
+            std::ifstream f(utf8_path(path), std::ios::binary);
             if (!f) return false;
             uint32_t magic;
             uint64_t sz;
@@ -1512,21 +1529,26 @@ public:
         float* raw = nullptr;
         unsigned ch = 0, sr = 0;
         drwav_uint64 n = 0;
-        
+
+        // Read the file ourselves (UTF-8 path, see utf8_path) and decode from memory.
+        std::vector<unsigned char> bytes;
+        if (!read_file_bytes(path, bytes) || bytes.empty())
+            throw std::runtime_error("Failed to load audio: " + path);
+
         if (ext == ".mp3") {
             drmp3_config mp3_cfg{};
             drmp3_uint64 mp3_n = 0;
-            raw = drmp3_open_file_and_read_pcm_frames_f32(path.c_str(), &mp3_cfg, &mp3_n, nullptr);
+            raw = drmp3_open_memory_and_read_pcm_frames_f32(bytes.data(), bytes.size(), &mp3_cfg, &mp3_n, nullptr);
             ch = mp3_cfg.channels;
             sr = mp3_cfg.sampleRate;
             n = mp3_n;
         } else if (ext == ".flac" || ext == ".ogg") {
             drflac_uint64 flac_n = 0;
-            raw = drflac_open_file_and_read_pcm_frames_f32(path.c_str(), &ch, &sr, &flac_n, nullptr);
+            raw = drflac_open_memory_and_read_pcm_frames_f32(bytes.data(), bytes.size(), &ch, &sr, &flac_n, nullptr);
             n = flac_n;
         } else {
             // Default to WAV (handles .wav and any unknown extension)
-            raw = drwav_open_file_and_read_pcm_frames_f32(path.c_str(), &ch, &sr, &n, nullptr);
+            raw = drwav_open_memory_and_read_pcm_frames_f32(bytes.data(), bytes.size(), &ch, &sr, &n, nullptr);
         }
         
         if (!raw) throw std::runtime_error("Failed to load audio: " + path);
@@ -1557,10 +1579,16 @@ public:
         auto _ = g_prof.time("save_audio");
         drwav w;
         drwav_data_format fmt{drwav_container_riff, DR_WAVE_FORMAT_IEEE_FLOAT, 1, drwav_uint32(a.sample_rate), 32};
-        if (!drwav_init_file_write(&w, path.c_str(), &fmt, nullptr))
+        void* buf = nullptr;
+        size_t buf_size = 0;
+        if (!drwav_init_memory_write(&w, &buf, &buf_size, &fmt, nullptr))
             throw std::runtime_error("Failed to write: " + path);
         drwav_write_pcm_frames(&w, a.samples.size(), a.samples.data());
         drwav_uninit(&w);
+        std::ofstream out(utf8_path(path), std::ios::binary);  // UTF-8 path
+        const bool ok = out && out.write(static_cast<const char*>(buf), static_cast<std::streamsize>(buf_size));
+        drwav_free(buf, nullptr);
+        if (!ok) throw std::runtime_error("Failed to write: " + path);
     }
     
     // ── Voice Encoding ──────────────────────────────────────────────────────
