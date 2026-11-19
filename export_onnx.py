@@ -1204,6 +1204,9 @@ def main():
                         help="Skip export/quantize, only validate existing ONNX files")
     parser.add_argument("--no-validate", action="store_true",
                         help="Skip validation")
+    parser.add_argument("--mirror", action="store_true",
+                        help="Download weights from the third-party ungated mirror instead of "
+                             "kyutai/pocket-tts (official, gated: needs HF_TOKEN)")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -1214,7 +1217,14 @@ def main():
     print("PocketTTS ONNX Export")
     print("=" * 60)
 
-    HF_BASE = "https://huggingface.co/Verylicious/pocket-tts-ungated/resolve/main"
+    # Weights source. Default: Kyutai's official repository (gated: accept its terms on
+    # huggingface.co/kyutai/pocket-tts and set HF_TOKEN), at the revision pinned in pocket-tts's
+    # own config. --mirror keeps the previous behaviour (third-party ungated copy, no token).
+    OFFICIAL_REPO = "kyutai/pocket-tts"
+    OFFICIAL_REVISION = "427e3d61b276ed69fdd03de0d185fa8a8d97fc5b"   # b6369a24.yaml weights_path
+    TOKENIZER_REPO = "kyutai/pocket-tts-without-voice-cloning"
+    TOKENIZER_REVISION = "d4fdd22ae8c8e1cb3634e150ebeff1dab2d16df3"  # b6369a24.yaml tokenizer_path
+    MIRROR_BASE = "https://huggingface.co/Verylicious/pocket-tts-ungated/resolve/main"
 
     def _download(url: str, dest: Path):
         """Download a file with progress."""
@@ -1233,19 +1243,43 @@ def main():
             if total:
                 print()
 
+    def _official(repo: str, filename: str, revision: str, dest: Path):
+        """Download from the official Hugging Face repo (uses HF_TOKEN for gated repos)."""
+        import shutil
+        from huggingface_hub import hf_hub_download
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        cached = hf_hub_download(repo_id=repo, filename=filename, revision=revision)
+        shutil.copyfile(cached, dest)
+
+    def _sha256(path: Path) -> str:
+        import hashlib
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            while chunk := f.read(1 << 20):
+                h.update(chunk)
+        return h.hexdigest()
+
     # Download weights (cached, only needed for export)
     weights_file = cache_dir / "tts_b6369a24.safetensors"
     if not weights_file.exists():
         print("\nDownloading weights...")
-        _download(f"{HF_BASE}/tts_b6369a24.safetensors", weights_file)
+        if args.mirror:
+            _download(f"{MIRROR_BASE}/tts_b6369a24.safetensors", weights_file)
+        else:
+            _official(OFFICIAL_REPO, "tts_b6369a24.safetensors", OFFICIAL_REVISION, weights_file)
         print(f"  ✓ {weights_file}")
+    print(f"  weights sha256: {_sha256(weights_file)}")
 
     # Download tokenizer (needed at runtime)
     tokenizer_file = output_dir / "tokenizer.model"
     if not tokenizer_file.exists():
         print("Downloading tokenizer...")
-        _download(f"{HF_BASE}/tokenizer.model", tokenizer_file)
+        if args.mirror:
+            _download(f"{MIRROR_BASE}/tokenizer.model", tokenizer_file)
+        else:
+            _official(TOKENIZER_REPO, "tokenizer.model", TOKENIZER_REVISION, tokenizer_file)
         print(f"  ✓ {tokenizer_file}")
+    print(f"  tokenizer sha256: {_sha256(tokenizer_file)}")
 
     # Build config pointing at local weights
     import pocket_tts as _ptt
