@@ -164,7 +164,7 @@ struct Config {
     std::string models_dir = "models", tokenizer_path = "models/tokenizer.model";
     std::string voices_dir = "voices";
     std::string precision = "int8";
-    float temperature = 0.7f;
+    float temperature = -1.0f;  // < 0: automatic (language.tsv default_temperature, else 0.7)
     float eos_threshold = -4.0f;
     float noise_clamp = 0.0f;
     int lsd_steps = 1, num_threads = 0, first_chunk_frames = 1, max_chunk_frames = 15;
@@ -312,9 +312,55 @@ static int count_words(const std::string& text) {
 
 // Prepare text for synthesis and compute frames_after_eos.
 // Returns {prepared_text, eos_extra_frames}.
-static std::pair<std::string, int> prepare_text(const std::string& raw, int cfg_eos_extra) {
+// Per-language text normalization of pocket-tts >= 3 models (models_dir/language.tsv, written by
+// export_onnx.py --language-config). Mirrors pocket_tts/models/text_chunking.py prepare_text_prompt.
+struct LanguageText {
+    std::vector<std::pair<std::string, std::string>> replace;  // UTF-8 from -> to
+    bool remove_semicolons = false;
+    float default_temperature = -1.0f;  // < 0: none
+};
+
+static void language_normalize(std::string& text, const LanguageText& lang) {
+    if (!lang.replace.empty()) {
+        for (const auto& [from, to] : lang.replace) {
+            if (from.empty()) continue;
+            for (size_t pos = 0; (pos = text.find(from, pos)) != std::string::npos; pos += to.size())
+                text.replace(pos, from.size(), to);
+        }
+        // " ".join(text.split())
+        std::string collapsed;
+        bool space = false;
+        for (char c : text) {
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r') { space = !collapsed.empty(); continue; }
+            if (space) { collapsed += ' '; space = false; }
+            collapsed += c;
+        }
+        text = collapsed;
+        // re.sub(r"([.!?…])\s*[,;:]", r"\1", text): keep the sentence mark, drop the stray comma
+        static const char* marks[] = {".", "!", "?", "\xe2\x80\xa6"};
+        std::string out;
+        for (size_t i = 0; i < text.size();) {
+            size_t mlen = 0;
+            for (const char* m : marks)
+                if (text.compare(i, strlen(m), m) == 0) { mlen = strlen(m); break; }
+            if (mlen == 0) { out += text[i++]; continue; }
+            out.append(text, i, mlen);
+            size_t j = i + mlen;
+            while (j < text.size() && text[j] == ' ') ++j;
+            if (j < text.size() && (text[j] == ',' || text[j] == ';' || text[j] == ':')) i = j + 1;
+            else i += mlen;
+        }
+        text = out;
+    }
+    if (lang.remove_semicolons)
+        for (auto& c : text) if (c == ';') c = ',';
+}
+
+static std::pair<std::string, int> prepare_text(const std::string& raw, int cfg_eos_extra,
+                                                const LanguageText* lang = nullptr) {
     std::string text = raw;
-    
+    if (lang) language_normalize(text, *lang);
+
     // Strip characters the model can't speak
     std::string cleaned;
     cleaned.reserve(text.size());
@@ -493,14 +539,16 @@ static bool mkdir_p(const std::string& path) {
 
 // Derive cache file path: {cache_root}/{stem}-{hash}.{ext}
 // cache_root = Config::cache_dir, or {voices_dir}/.cache when empty (upstream default).
-// The hash (FNV-1a of the full voice path) keeps clips with the same file name in
-// different folders from sharing a cache entry.
+// The hash (FNV-1a of the full voice path + model key) keeps clips with the same file name in
+// different folders from sharing a cache entry, and keeps models (language models, int8/fp32)
+// from loading each other's entries: the conditioning and KV state depend on the model.
 // ext = "emb" for voice embeddings, "kv" for KV state snapshots
 static std::string cache_root(const std::string& voices_dir, const std::string& cache_dir) {
     return cache_dir.empty() ? voices_dir + "/.cache" : cache_dir;
 }
 
-static std::string get_cache_path(const std::string& root, const std::string& voice_path, const char* ext = "emb") {
+static std::string get_cache_path(const std::string& root, const std::string& voice_path, const char* ext,
+                                  const std::string& model_key) {
     std::string filename = voice_path;
     size_t slash = voice_path.find_last_of("/\\");
     if (slash != std::string::npos) filename = voice_path.substr(slash + 1);
@@ -510,6 +558,12 @@ static std::string get_cache_path(const std::string& root, const std::string& vo
     for (unsigned char ch : voice_path) {
         if (ch == '\\') ch = '/';
         if (ch >= 'A' && ch <= 'Z') ch = static_cast<unsigned char>(ch - 'A' + 'a');  // Windows paths
+        h = (h ^ ch) * 16777619u;
+    }
+    h = (h ^ 0u) * 16777619u;  // separator
+    for (unsigned char ch : model_key) {
+        if (ch == '\\') ch = '/';
+        if (ch >= 'A' && ch <= 'Z') ch = static_cast<unsigned char>(ch - 'A' + 'a');
         h = (h ^ ch) * 16777619u;
     }
     char hex[9];
@@ -1431,6 +1485,9 @@ public:
     explicit PocketTTS(const Config& cfg = {}) : cfg_(cfg) {
         rng::seed(uint64_t(std::chrono::high_resolution_clock::now().time_since_epoch().count()));
         tok_ = std::make_unique<Tokenizer>(cfg_.tokenizer_path);
+        load_language_text();
+        if (cfg_.temperature < 0.0f)  // "automatic": the language model's default, else upstream 0.7
+            cfg_.temperature = lang_.default_temperature >= 0.0f ? lang_.default_temperature : 0.7f;
         
         // Thread budget: --threads sets the total. During pipelined streaming,
         // the AR generator and Mimi decoder run simultaneously, so we split the
@@ -1597,7 +1654,7 @@ public:
         auto timer = g_prof.time("encode_voice");
         
         if (cfg_.voice_cache) {
-            std::string cache_path = cache::get_cache_path(cache::cache_root(cfg_.voices_dir, cfg_.cache_dir), path);
+            std::string cache_path = cache::get_cache_path(cache::cache_root(cfg_.voices_dir, cfg_.cache_dir), path, "emb", cache_model_key());
             
             if (cache::is_cache_valid(path, cache_path)) {
                 auto cache_timer = g_prof.time("encode_voice.cache_load");
@@ -1640,7 +1697,7 @@ public:
         if (r.shape.size() < 3) r.reshape({1, r.shape[0], r.shape[1]});
         
         if (cfg_.voice_cache) {
-            std::string cache_path = cache::get_cache_path(cache::cache_root(cfg_.voices_dir, cfg_.cache_dir), path);
+            std::string cache_path = cache::get_cache_path(cache::cache_root(cfg_.voices_dir, cfg_.cache_dir), path, "emb", cache_model_key());
             if (cache::save_embedding(cache_path, r.shape, r.data)) {
                 if (cfg_.verbose) {
                     std::cerr << "  Saved embedding cache: " << cache_path << "\n";
@@ -1676,6 +1733,27 @@ public:
 
 private:
     Config cfg_;
+    LanguageText lang_;  // per-language text normalization (pocket-tts >= 3 models)
+
+    // Cached conditioning / KV state belong to one model: folder + precision.
+    std::string cache_model_key() const { return cfg_.models_dir + "|" + cfg_.precision; }
+
+    // models_dir/language.tsv (export_onnx.py --language-config); absent for the 1.x English model.
+    void load_language_text() {
+        std::ifstream f(utf8_path(cfg_.models_dir + "/language.tsv"), std::ios::binary);
+        std::string line;
+        while (f && std::getline(f, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            std::vector<std::string> cols;
+            size_t start = 0;
+            for (size_t tab; (tab = line.find('\t', start)) != std::string::npos; start = tab + 1)
+                cols.push_back(line.substr(start, tab - start));
+            cols.push_back(line.substr(start));
+            if (cols[0] == "replace" && cols.size() == 3) lang_.replace.emplace_back(cols[1], cols[2]);
+            else if (cols[0] == "remove_semicolons" && cols.size() == 2) lang_.remove_semicolons = cols[1] == "1";
+            else if (cols[0] == "default_temperature" && cols.size() == 2) lang_.default_temperature = std::stof(cols[1]);
+        }
+    }
     std::unique_ptr<OrtSession> enc_, txt_, main_, flow_, dec_;
     std::unique_ptr<Tokenizer> tok_;
     std::unique_ptr<StatefulRunner> main_runner_;
@@ -1944,7 +2022,7 @@ private:
         
         // Tier 2: disk cache hit
         if (cfg_.voice_cache && !voice_kv_path_.empty()) {
-            std::string kv_path = cache::get_cache_path(cache::cache_root(cfg_.voices_dir, cfg_.cache_dir), resolve_voice_path(voice_kv_path_), "kv");
+            std::string kv_path = cache::get_cache_path(cache::cache_root(cfg_.voices_dir, cfg_.cache_dir), resolve_voice_path(voice_kv_path_), "kv", cache_model_key());
             std::string resolved = resolve_voice_path(voice_kv_path_);
             StateBufferIO::DiskSnapshot ds;
             if (cache::is_cache_valid(resolved, kv_path) && ds.load_from_disk(kv_path)) {
@@ -1963,7 +2041,7 @@ private:
         voice_kv_hash_ = vh;
         
         if (cfg_.voice_cache && !voice_kv_path_.empty()) {
-            std::string kv_path = cache::get_cache_path(cache::cache_root(cfg_.voices_dir, cfg_.cache_dir), resolve_voice_path(voice_kv_path_), "kv");
+            std::string kv_path = cache::get_cache_path(cache::cache_root(cfg_.voices_dir, cfg_.cache_dir), resolve_voice_path(voice_kv_path_), "kv", cache_model_key());
             auto ds = main_runner_->snapshot_to_disk(*voice_kv_snap_);
             if (ds.save_to_disk(kv_path)) {
                 if (cfg_.verbose) std::cerr << "  Saved KV cache: " << kv_path << "\n";
@@ -2044,7 +2122,7 @@ void PocketTTS::stream(const std::string& text, const Tensor& voice, StreamCallb
     if (sentences.empty()) sentences.push_back(text);
     
     for (size_t si = 0; si < sentences.size(); ++si) {
-        auto [prepared, eos_extra] = prepare_text(sentences[si], cfg_.eos_extra_frames);
+        auto [prepared, eos_extra] = prepare_text(sentences[si], cfg_.eos_extra_frames, &lang_);
         if (prepared.empty()) continue;
         auto gen = make_gen(voice, tokenize(prepared), max_frames, eos_extra);
         dec_runner_->reset_state();  // zero existing buffers, no reallocation
@@ -2629,7 +2707,7 @@ ptt_config ptt_config_default(void) {
     c.voices_dir = nullptr;
     c.tokenizer_path = nullptr;
     c.precision = nullptr;
-    c.temperature = d.temperature;
+    c.temperature = -1.0f;  // automatic: language.tsv default_temperature (0.3 for pocket-tts >= 3 models), else 0.7
     c.lsd_steps = d.lsd_steps;
     c.num_threads = d.num_threads;
     c.eos_threshold = d.eos_threshold;
@@ -2791,7 +2869,7 @@ int main(int argc, char* argv[]) {
                 "       " << argv[0] << " --server [OPTIONS]\n"
                 "\nOptions:\n"
                 "  --precision <int8|fp32>  Model precision (default: int8)\n"
-                "  --temperature <float>    Sampling temperature (default: 0.7)\n"
+                "  --temperature <float>    Sampling temperature (default: the model folder's language.tsv value, else 0.7)\n"
                 "  --lsd-steps <int>        Flow matching steps (default: 1)\n"
                 "  --threads <int>          Total thread budget (default: 0 = half cores)\n"
                 "  --models-dir <path>      ONNX models directory (default: models)\n"

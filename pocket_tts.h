@@ -16,11 +16,13 @@ void* ptt_create(const char* models_dir, const char* voices_dir, const char* tok
 
 /* All engine options. Initialise with ptt_config_default(), then change what you need. */
 typedef struct ptt_config {
-    const char* models_dir;      /* default "models" */
+    const char* models_dir;      /* default "models"; for pocket-tts >= 3 language models this
+                                    folder also holds language.tsv (text normalization) */
     const char* voices_dir;      /* default "voices" */
     const char* tokenizer_path;  /* default "models/tokenizer.model" */
     const char* precision;       /* "int8" (default) or "fp32" */
-    float temperature;           /* default 0.7 */
+    float temperature;           /* default -1 = automatic: the model's language.tsv
+                                    default_temperature (0.3 for pocket-tts >= 3 models), else 0.7 */
     int   lsd_steps;             /* default 1 */
     int   num_threads;           /* default 0 = half the cores */
     float eos_threshold;         /* end-of-speech logit threshold, default -4.0 */

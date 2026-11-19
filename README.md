@@ -57,6 +57,34 @@ models/
 └── tokenizer.model
 ```
 
+### Multilingual models (pocket-tts >= 3)
+
+pocket-tts 3 adds per-language models (English 2026, French, German, Spanish, Italian, Portuguese,
+Dutch; 6-layer variants). They keep this runtime's architecture, with three differences that the
+export handles, so `pocket_tts.cpp` needs no model-specific code:
+
+| pocket-tts 3 change | handled by |
+|---|---|
+| voice-encoder downsampling outputs 32 channels (`mimi.inner_dim`), `speaker_proj_weight` is `[1024, 32]` | `export_onnx.py --language-weights` (`apply_language_weights`) |
+| `insert_bos_before_voice`: a learned `[1, 1, 1024]` row before the voice conditioning | prepended inside `mimi_encoder.onnx` |
+| `tokenizer.json` (HF tokenizers, Unigram, byte fallback) | `scripts/tokenizer_json_to_spm.py` → `tokenizer.model`, ids verified identical |
+| per-language text normalization (`replace_characters`, `remove_semicolons`), `default_temperature` 0.3 | `--language-config` writes `language.tsv`, read from `models_dir` at start-up |
+
+```bash
+# in a pocket-tts 3 environment: tokenizer
+python scripts/tokenizer_json_to_spm.py --json <lang>/tokenizer.json --out <lang>/tokenizer.model
+# in the 1.x export environment (above) + pyyaml: export, quantize, validate
+python export_onnx.py --output-dir models/<lang> --language-weights <lang>/model.safetensors \
+    --language-tokenizer <lang>/tokenizer.model --language-config <pocket_tts>/config/<lang>.yaml
+# optional, pocket-tts 3 environment: compare with the official code
+python scripts/check_language_export.py --config <lang>.yaml --weights <lang>/model.safetensors \
+    --tokenizer-json <lang>/tokenizer.json --onnx-dir models/<lang> --audio clip_24khz.wav --text "..."
+```
+
+One folder per language; point `models_dir` / `--models` at it. Temperature defaults to "automatic"
+(`ptt_config_default()`: the folder's `language.tsv` value, else 0.7). Voice cache entries are keyed
+by voice path + model folder + precision, so models never load each other's cached voices.
+
 ### Directory Structure
 
 ```
