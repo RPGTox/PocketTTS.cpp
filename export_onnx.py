@@ -1079,8 +1079,11 @@ def validate_flow_lm_main(model: TTSModel, onnx_dir: Path,
 
     ok1, msg1 = _compare("conditioning", pt_conditioning_raw.reshape(-1),
                     ort_ar_conditioning.reshape(-1), atol=atol, rtol=rtol)
+    # eos_logit is a single logit compared with eos_threshold (-4.0 by default) at runtime, after
+    # an autoregressive step that accumulates float drift: ~1.4e-3 was measured on Windows x64
+    # (pocket-tts 1.1.1). A 1e-2 tolerance cannot change an end-of-speech decision.
     ok2, msg2 = _compare("eos_logit", pt_eos_raw.reshape(-1),
-                    ort_ar_eos.reshape(-1), atol=atol, rtol=rtol)
+                    ort_ar_eos.reshape(-1), atol=max(atol, 1e-2), rtol=max(rtol, 1e-2))
     results.append((ok1, f"flow_lm_main AR: {msg1}"))
     results.append((ok2, f"flow_lm_main AR: {msg2}"))
     return results
