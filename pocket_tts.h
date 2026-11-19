@@ -36,7 +36,7 @@ ptt_config ptt_config_default(void);
 /* Creates an engine from a full configuration. Returns NULL on error (message on stderr). */
 void* ptt_create_ex(const ptt_config* config);
 
-/* Runs one short synthesis so the first real line is fast. Returns seconds, or -1 on error. */
+/* Runs one short synthesis so the first real line is fast. Returns milliseconds, or -1 on error. */
 double ptt_warmup(void* handle);
 
 void ptt_destroy(void* handle);

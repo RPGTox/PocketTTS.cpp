@@ -1659,7 +1659,9 @@ private:
     // ── Voice Resolution ────────────────────────────────────────────────────
     
     std::string resolve_voice_path(const std::string& p) const {
-        if (!p.empty() && p[0] == '/') return p;
+        if (!p.empty() && (p[0] == '/' || p[0] == '\\')) return p;          // POSIX / UNC
+        if (p.size() >= 2 && p[1] == ':' &&
+            ((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z'))) return p;  // C:\ or C:/
         return cfg_.voices_dir + "/" + p;
     }
     
