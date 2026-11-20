@@ -1760,7 +1760,10 @@ private:
     std::unique_ptr<StatefulRunner> dec_runner_;  // reused across stream() calls
     std::vector<std::pair<float, float>> st_values_;
     float dt_;
-    std::unordered_map<std::string, Tensor> vcache_;
+    // UANF fork: the in-memory voice is reused only while the clip file is unchanged (same date
+    // and size): a clip rewritten at the same path (a regenerated voice) is encoded again.
+    struct VoiceEntry { int64_t mtime = 0; uintmax_t size = 0; Tensor emb; };
+    std::unordered_map<std::string, VoiceEntry> vcache_;
     
     // ── Voice Resolution ────────────────────────────────────────────────────
     
@@ -1773,11 +1776,17 @@ private:
     
     const Tensor& get_voice(const std::string& p) {
         voice_kv_path_ = p;
-        auto it = vcache_.find(p);
-        if (it != vcache_.end()) return it->second;
-        
         std::string resolved = resolve_voice_path(p);
-        return vcache_[p] = encode_voice(resolved);
+        const int64_t mtime = cache::get_mtime(resolved);
+        std::error_code ec;
+        const uintmax_t size = std::filesystem::file_size(utf8_path(resolved), ec);
+        auto it = vcache_.find(p);
+        if (it != vcache_.end() && it->second.mtime == mtime && it->second.size == (ec ? 0 : size)) return it->second.emb;
+        VoiceEntry& e = vcache_[p];
+        e.emb = encode_voice(resolved);
+        e.mtime = mtime;
+        e.size = ec ? 0 : size;
+        return e.emb;
     }
     
     // ── Tokenization ────────────────────────────────────────────────────────
