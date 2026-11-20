@@ -2000,9 +2000,14 @@ private:
     uint64_t voice_kv_hash_ = 0;
     std::string voice_kv_path_;
     
+    // UANF fork: the whole embedding (and its length) is hashed. Hashing only the first 16 floats made
+    // different voices whose clips start with the same silence share one KV snapshot: the second
+    // voice was spoken with the first voice's conditioning, and its .kv cache was never written.
     static uint64_t voice_hash(const Tensor& v) {
         uint64_t h = 14695981039346656037ull;
-        int n = std::min(16, int(v.data.size()));
+        h ^= static_cast<uint64_t>(v.data.size());
+        h *= 1099511628211ull;
+        int n = int(v.data.size());
         for (int i = 0; i < n; ++i) {
             uint32_t bits;
             memcpy(&bits, &v.data[i], sizeof(bits));
